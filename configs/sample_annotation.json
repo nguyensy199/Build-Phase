@@ -1,0 +1,90 @@
+{
+  "info": {
+    "sample_id": "sample_demo_01",
+    "name": "Traffic intersection clip",
+    "type": "video",
+    "fps": 30.0,
+    "width": 1920,
+    "height": 1080,
+    "frame_count": 90,
+    "bbox_format": "xywh_pixel_topleft",
+    "frame_index_base": 0,
+    "exported_at": "2026-10-12T12:00:00Z",
+    "model_version": "yolov8s_coco",
+    "tracker": "botsort"
+  },
+  "classes": [
+    "car",
+    "bus",
+    "truck",
+    "van",
+    "motorcycle",
+    "person"
+  ],
+  "frames": [
+    {
+      "frame": 0,
+      "objects": [
+        {
+          "track_id": 1,
+          "class": "car",
+          "bbox": [540.0, 320.0, 180.0, 110.0],
+          "confidence": 0.89,
+          "source": "auto"
+        },
+        {
+          "track_id": 2,
+          "class": "motorcycle",
+          "bbox": [780.0, 450.0, 65.0, 120.0],
+          "confidence": 0.82,
+          "source": "auto"
+        }
+      ]
+    },
+    {
+      "frame": 1,
+      "objects": [
+        {
+          "track_id": 1,
+          "class": "car",
+          "bbox": [544.0, 322.0, 181.0, 110.0],
+          "confidence": 0.91,
+          "source": "auto"
+        },
+        {
+          "track_id": 2,
+          "class": "motorcycle",
+          "bbox": [785.0, 452.0, 64.0, 120.0],
+          "confidence": 0.85,
+          "source": "auto"
+        }
+      ]
+    },
+    {
+      "frame": 2,
+      "objects": [
+        {
+          "track_id": 1,
+          "class": "car",
+          "bbox": [549.0, 325.0, 180.0, 110.0],
+          "confidence": 0.90,
+          "source": "auto"
+        },
+        {
+          "track_id": 2,
+          "class": "motorcycle",
+          "bbox": [791.0, 455.0, 65.0, 119.0],
+          "confidence": 0.84,
+          "source": "auto"
+        },
+        {
+          "track_id": 3,
+          "class": "person",
+          "bbox": [920.0, 410.0, 45.0, 105.0],
+          "confidence": 0.78,
+          "source": "manual"
+        }
+      ]
+    }
+  ]
+}

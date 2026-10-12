@@ -1,0 +1,10 @@
+{
+  "type": "image_sequence",
+  "name": "sample_seq_demo.zip",
+  "width": 640,
+  "height": 360,
+  "fps": 15.0,
+  "frame_count": 10,
+  "bbox_format": "xywh_pixel_topleft",
+  "frame_index_base": 0
+}

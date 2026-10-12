@@ -1,0 +1,66 @@
+{
+  "info": {
+    "sample_id": "seq_1791786108_18c87e",
+    "name": "sample_seq_demo.zip",
+    "type": "image_sequence",
+    "fps": 15.0,
+    "width": 640,
+    "height": 360,
+    "frame_count": 10,
+    "bbox_format": "xywh_pixel_topleft",
+    "frame_index_base": 0,
+    "exported_at": "2026-10-12T06:21:48Z",
+    "model_version": "yolov8s_coco",
+    "tracker": "botsort"
+  },
+  "classes": [
+    "car",
+    "bus",
+    "truck",
+    "van",
+    "motorcycle",
+    "person"
+  ],
+  "frames": [
+    {
+      "frame": 0,
+      "objects": []
+    },
+    {
+      "frame": 1,
+      "objects": []
+    },
+    {
+      "frame": 2,
+      "objects": []
+    },
+    {
+      "frame": 3,
+      "objects": []
+    },
+    {
+      "frame": 4,
+      "objects": []
+    },
+    {
+      "frame": 5,
+      "objects": []
+    },
+    {
+      "frame": 6,
+      "objects": []
+    },
+    {
+      "frame": 7,
+      "objects": []
+    },
+    {
+      "frame": 8,
+      "objects": []
+    },
+    {
+      "frame": 9,
+      "objects": []
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "classes": [
+    {
+      "id": 0,
+      "name": "car",
+      "display_name": "Ô tô (Car)",
+      "color": "#3B82F6",
+      "hotkey": "1",
+      "coco_id": 2
+    },
+    {
+      "id": 1,
+      "name": "bus",
+      "display_name": "Xe buýt (Bus)",
+      "color": "#10B981",
+      "hotkey": "2",
+      "coco_id": 5
+    },
+    {
+      "id": 2,
+      "name": "truck",
+      "display_name": "Xe tải (Truck)",
+      "color": "#F59E0B",
+      "hotkey": "3",
+      "coco_id": 7
+    },
+    {
+      "id": 3,
+      "name": "van",
+      "display_name": "Xe van (Van)",
+      "color": "#8B5CF6",
+      "hotkey": "4",
+      "coco_id": null,
+      "coco_note": "COCO không có class van. Sẽ detect thành car/truck trong giai đoạn pretrained."
+    },
+    {
+      "id": 4,
+      "name": "motorcycle",
+      "display_name": "Xe máy (Motorcycle)",
+      "color": "#EC4899",
+      "hotkey": "5",
+      "coco_id": 3
+    },
+    {
+      "id": 5,
+      "name": "person",
+      "display_name": "Người đi bộ (Person)",
+      "color": "#EF4444",
+      "hotkey": "6",
+      "coco_id": 0
+    }
+  ],
+  "rules": {
+    "bbox_format": "xywh_pixel_topleft",
+    "frame_index_base": 0,
+    "default_detection_conf": 0.25,
+    "cache_detection_conf": 0.10,
+    "tracker_default": "botsort",
+    "tracker_fallback": "bytetrack"
+  }
+}

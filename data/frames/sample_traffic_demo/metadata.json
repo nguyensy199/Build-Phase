@@ -1,0 +1,8 @@
+{
+  "width": 1280,
+  "height": 720,
+  "fps": 30.0,
+  "frame_count": 120,
+  "bbox_format": "xywh_pixel_topleft",
+  "frame_index_base": 0
+}

@@ -1,0 +1,119 @@
+# ==============================================================================
+# 1. FILE QUẢN LÝ DỰ ÁN & BACKLOG (Không đẩy lên Git)
+# ==============================================================================
+*.xlsx
+*.xls
+*.xlsm
+MVP_Backlog_Tracking_BBox2D*.xlsx
+
+# ==============================================================================
+# 2. THÔNG TIN BẢO MẬT & MÔI TRƯỜNG (Credentials, Keys, Tokens)
+# ==============================================================================
+.env
+.env.*
+*.env
+*.pem
+*.key
+*token*
+*secret*
+*credential*
+*password*
+
+# ==============================================================================
+# 3. DỮ LIỆU MEDIA & GROUND TRUTH THỰC TẾ (Không đẩy video/ảnh nặng & dữ liệu thô)
+# ==============================================================================
+# Bỏ qua toàn bộ nội dung trong thư mục data/, chỉ giữ lại file .gitkeep để duy trì cấu trúc
+/data/*
+!/data/raw
+!/data/raw/.gitkeep
+!/data/frames
+!/data/frames/.gitkeep
+!/data/detections
+!/data/detections/.gitkeep
+!/data/exports
+!/data/exports/.gitkeep
+/data/temp/
+
+# Các định dạng file media & dữ liệu nặng
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+*.tar.gz
+*.7z
+*.jpg
+*.jpeg
+*.png
+
+# ==============================================================================
+# 4. TRỌNG SỐ MÔ HÌNH AI (Weights & Models)
+# ==============================================================================
+*.pt
+*.pth
+*.onnx
+*.engine
+*.bin
+/models/*
+!/models/model_card.md
+
+# ==============================================================================
+# 5. CƠ SỞ DỮ LIỆU & LOGS
+# ==============================================================================
+*.db
+*.sqlite
+*.sqlite3
+*.log
+runs/
+
+# ==============================================================================
+# 6. PYTHON ARTIFACTS
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==============================================================================
+# 7. NODEJS & FRONTEND ARTIFACTS
+# ==============================================================================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ==============================================================================
+# 8. IDE & HỆ ĐIỀU HÀNH
+# ==============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
