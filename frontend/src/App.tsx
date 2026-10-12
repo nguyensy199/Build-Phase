@@ -4,9 +4,10 @@ import {
   Play, Pause, SkipBack, SkipForward, Download, 
   Upload, Sparkles, Save, CheckCircle2, AlertCircle, RefreshCw, X, FolderOpen, Film, Images,
   Trash2, MousePointer, PlusCircle, Undo2, Redo2, 
-  GitMerge, Edit3, Eye, EyeOff, Waypoints, BoxSelect
+  GitMerge, Edit3, Eye, EyeOff, Waypoints, BoxSelect,
+  Flag, CheckCheck, AlertTriangle, ShieldCheck
 } from 'lucide-react';
-import type { ClassConfig, SampleAnnotationData, BBoxObject } from './types';
+import type { ClassConfig, SampleAnnotationData, BBoxObject, ReviewFlag } from './types';
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1';
 
@@ -34,11 +35,11 @@ export default function App() {
   const [activeClass, setActiveClass] = useState<string>('car');
   const [frameImage, setFrameImage] = useState<HTMLImageElement | null>(null);
   
-  // View mode: 'track' (video tracking with ID) vs 'shape' (static BBox for images)
+  // View mode: 'track' vs 'shape'
   const [annotationMode, setAnnotationMode] = useState<'track' | 'shape'>('track');
   
-  // Right sidebar tab: 'frame' objects vs 'all_tracks' overview
-  const [rightTab, setRightTab] = useState<'frame' | 'tracks'>('frame');
+  // Right sidebar tab: 'frame' | 'tracks' | 'review' (EP-09)
+  const [rightTab, setRightTab] = useState<'frame' | 'tracks' | 'review'>('frame');
 
   // Motion trail toggle (T-107)
   const [showMotionTrail, setShowMotionTrail] = useState<boolean>(true);
@@ -57,6 +58,10 @@ export default function App() {
   const [showMergeModal, setShowMergeModal] = useState(false);
   const [mergeSourceId, setMergeSourceId] = useState<number | null>(null);
   const [mergeDestId, setMergeDestId] = useState<number | null>(null);
+
+  // Manual Flag Modal (T-120)
+  const [showFlagModal, setShowFlagModal] = useState(false);
+  const [flagNote, setFlagNote] = useState('');
 
   // Upload Modal states (T-017)
   const [showUploadModal, setShowUploadModal] = useState(false);
@@ -121,12 +126,12 @@ export default function App() {
       const res = await fetch(`${API_BASE}/samples/${sampleId}/annotations`);
       if (!res.ok) throw new Error('Không tải được annotation');
       const data: SampleAnnotationData = await res.json();
+      if (!data.flags) data.flags = [];
       setAnnotationData(data);
       setHistory([data]);
       setHistoryIndex(0);
       setCurrentFrame(0);
       setSelectedTrackId(null);
-      // Auto switch to shape mode if sample is image_sequence with 1 frame, or default to track mode
       if (data.info.type === 'image_sequence' && data.info.frame_count <= 1) {
         setAnnotationMode('shape');
       } else {
@@ -187,6 +192,7 @@ export default function App() {
 
   const frameObj = annotationData?.frames.find((f) => f.frame === currentFrame);
   const currentObjects: BBoxObject[] = frameObj ? frameObj.objects : [];
+  const isCurrentFrameVerified = frameObj?.verified || false;
 
   // Transformer binding for selected box (T-086)
   useEffect(() => {
@@ -203,7 +209,6 @@ export default function App() {
     }
   }, [selectedTrackId, currentFrame, currentObjects]);
 
-  // Next unique track ID (non-reusable)
   const getNextTrackId = (): number => {
     if (!annotationData) return 1;
     let maxId = 0;
@@ -215,7 +220,7 @@ export default function App() {
     return maxId + 1;
   };
 
-  // Compute all tracks summary across entire sample
+  // Compute all tracks summary
   const allTracksSummary = useMemo(() => {
     if (!annotationData) return [];
     const trackMap = new Map<number, { track_id: number, class: string, frameCount: number, firstFrame: number, lastFrame: number }>();
@@ -239,7 +244,7 @@ export default function App() {
     return Array.from(trackMap.values()).sort((a, b) => a.track_id - b.track_id);
   }, [annotationData]);
 
-  // Compute Motion Trail for the selected track (T-107)
+  // Motion Trail (T-107)
   const selectedTrackTrajectory = useMemo(() => {
     if (!annotationData || !selectedTrackId || !showMotionTrail || annotationMode !== 'track') return [];
     const points: Array<{ frame: number, x: number, y: number }> = [];
@@ -255,7 +260,6 @@ export default function App() {
     return points;
   }, [annotationData, selectedTrackId, showMotionTrail, annotationMode, scale]);
 
-  // Flattened points array for Konva Line: [x1, y1, x2, y2, ...]
   const trajectoryLinePoints = useMemo(() => {
     const flat: number[] = [];
     selectedTrackTrajectory.forEach(p => {
@@ -264,7 +268,188 @@ export default function App() {
     return flat;
   }, [selectedTrackTrajectory]);
 
-  // Delete selected BBox / Shape (T-088)
+  // Review Progress stats (T-121)
+  const reviewStats = useMemo(() => {
+    if (!annotationData) return { total: 0, verified: 0, percent: 0, openFlags: 0 };
+    const total = annotationData.frames.length;
+    const verified = annotationData.frames.filter(f => f.verified).length;
+    const percent = total > 0 ? Math.round((verified / total) * 100) : 0;
+    const openFlags = (annotationData.flags || []).filter(fl => !fl.resolved).length;
+    return { total, verified, percent, openFlags };
+  }, [annotationData]);
+
+  // Confirm Single Frame (T-121)
+  const handleToggleConfirmCurrentFrame = () => {
+    if (!annotationData) return;
+    const newVerified = !isCurrentFrameVerified;
+    const updatedFrames = annotationData.frames.map(f => {
+      if (f.frame === currentFrame) {
+        return { ...f, verified: newVerified };
+      }
+      return f;
+    });
+
+    const allVerified = updatedFrames.every(f => f.verified);
+    const newStatus = allVerified ? 'verified' : 'in_progress';
+
+    updateDataWithHistory({
+      ...annotationData,
+      info: { ...annotationData.info, review_status: newStatus },
+      frames: updatedFrames
+    });
+
+    showNotice('success', newVerified ? `Đã xác nhận Frame #${currentFrame}` : `Đã bỏ xác nhận Frame #${currentFrame}`);
+  };
+
+  // Confirm All Frames (T-121)
+  const handleConfirmAllFrames = () => {
+    if (!annotationData) return;
+    const updatedFrames = annotationData.frames.map(f => ({ ...f, verified: true }));
+    updateDataWithHistory({
+      ...annotationData,
+      info: { ...annotationData.info, review_status: 'verified' },
+      frames: updatedFrames
+    });
+    showNotice('success', 'Đã xác nhận toàn bộ video (Verified 100%)!');
+  };
+
+  // Run Auto-Scan for Potential Issues (T-123)
+  const handleAutoScanIssues = () => {
+    if (!annotationData) return;
+    const newFlags: ReviewFlag[] = [...(annotationData.flags || [])];
+    let detectedCount = 0;
+
+    // 1. Scan for short tracks (<= 2 frames)
+    allTracksSummary.forEach(t => {
+      if (t.frameCount <= 2) {
+        const flagId = `flag_short_${t.track_id}`;
+        if (!newFlags.some(f => f.id === flagId)) {
+          newFlags.push({
+            id: flagId,
+            frame: t.firstFrame,
+            track_id: t.track_id,
+            type: 'auto',
+            issue: `Track #${t.track_id} (${t.class}) xuất hiện quá ngắn (${t.frameCount} frames). Nghi ngờ False Positive.`,
+            resolved: false
+          });
+          detectedCount++;
+        }
+      }
+    });
+
+    // 2. Scan for sudden jump between consecutive frames (Speed anomaly / potential ID switch)
+    const trackPointsMap = new Map<number, Array<{ frame: number, cx: number, cy: number }>>();
+    annotationData.frames.forEach(f => {
+      f.objects.forEach(obj => {
+        if (!trackPointsMap.has(obj.track_id)) trackPointsMap.set(obj.track_id, []);
+        const [x, y, w, h] = obj.bbox;
+        trackPointsMap.get(obj.track_id)!.push({ frame: f.frame, cx: x + w / 2, cy: y + h / 2 });
+      });
+    });
+
+    trackPointsMap.forEach((points, tid) => {
+      for (let i = 0; i < points.length - 1; i++) {
+        const p1 = points[i];
+        const p2 = points[i + 1];
+        if (p2.frame - p1.frame === 1) {
+          const dist = Math.sqrt(Math.pow(p2.cx - p1.cx, 2) + Math.pow(p2.cy - p1.cy, 2));
+          // If distance jumped > 180px in 1 frame
+          if (dist > 180) {
+            const flagId = `flag_jump_${tid}_f${p2.frame}`;
+            if (!newFlags.some(f => f.id === flagId)) {
+              newFlags.push({
+                id: flagId,
+                frame: p2.frame,
+                track_id: tid,
+                type: 'auto',
+                issue: `Track #${tid} nhảy vị trí đột ngột (${Math.round(dist)}px). Nghi ngờ bị tráo xe (ID Switch).`,
+                resolved: false
+              });
+              detectedCount++;
+            }
+          }
+        }
+      }
+    });
+
+    // 3. Scan for tiny boxes (w < 15 or h < 15)
+    annotationData.frames.forEach(f => {
+      f.objects.forEach(obj => {
+        if (obj.bbox[2] < 15 || obj.bbox[3] < 15) {
+          const flagId = `flag_tiny_${f.frame}_${obj.track_id}`;
+          if (!newFlags.some(fl => fl.id === flagId)) {
+            newFlags.push({
+              id: flagId,
+              frame: f.frame,
+              track_id: obj.track_id,
+              type: 'auto',
+              issue: `BBox Track #${obj.track_id} quá nhỏ (${Math.round(obj.bbox[2])}x${Math.round(obj.bbox[3])}px).`,
+              resolved: false
+            });
+            detectedCount++;
+          }
+        }
+      });
+    });
+
+    updateDataWithHistory({
+      ...annotationData,
+      flags: newFlags
+    });
+
+    setRightTab('review');
+    showNotice('success', `Đã quét tự động: phát hiện ${detectedCount} cảnh báo lỗi tiềm năng!`);
+  };
+
+  // Add Manual Review Flag (T-120)
+  const handleAddManualFlag = () => {
+    if (!annotationData || !flagNote.trim()) return;
+    const newFlag: ReviewFlag = {
+      id: `flag_manual_${Date.now()}`,
+      frame: currentFrame,
+      track_id: selectedTrackId || undefined,
+      type: 'manual',
+      issue: flagNote.trim(),
+      resolved: false
+    };
+
+    updateDataWithHistory({
+      ...annotationData,
+      flags: [...(annotationData.flags || []), newFlag]
+    });
+
+    setFlagNote('');
+    setShowFlagModal(false);
+    setRightTab('review');
+    showNotice('success', `Đã cắm cờ tại Frame #${currentFrame}`);
+  };
+
+  // Resolve Review Flag
+  const handleToggleResolveFlag = (flagId: string) => {
+    if (!annotationData) return;
+    const updatedFlags = (annotationData.flags || []).map(fl => {
+      if (fl.id === flagId) return { ...fl, resolved: !fl.resolved };
+      return fl;
+    });
+
+    updateDataWithHistory({
+      ...annotationData,
+      flags: updatedFlags
+    });
+  };
+
+  // Delete Review Flag
+  const handleDeleteFlag = (flagId: string) => {
+    if (!annotationData) return;
+    const updatedFlags = (annotationData.flags || []).filter(fl => fl.id !== flagId);
+    updateDataWithHistory({
+      ...annotationData,
+      flags: updatedFlags
+    });
+    showNotice('success', 'Đã xóa cờ');
+  };
+
+  // Delete selected BBox (T-088)
   const handleDeleteSelectedBox = useCallback(() => {
     if (!annotationData || selectedTrackId === null) return;
     const updatedFrames = annotationData.frames.map((f) => {
@@ -282,7 +467,7 @@ export default function App() {
     showNotice('success', `Đã xóa đối tượng #${selectedTrackId} tại frame ${currentFrame}`);
   }, [annotationData, selectedTrackId, currentFrame, updateDataWithHistory]);
 
-  // Delete WHOLE Track across all frames (T-104)
+  // Delete WHOLE Track (T-104)
   const handleDeleteWholeTrack = useCallback((trackIdToDelete: number) => {
     if (!annotationData) return;
     const updatedFrames = annotationData.frames.map((f) => ({
@@ -294,7 +479,7 @@ export default function App() {
       frames: updatedFrames
     });
     if (selectedTrackId === trackIdToDelete) setSelectedTrackId(null);
-    showNotice('success', `Đã xóa toàn bộ Track #${trackIdToDelete} khỏi video`);
+    showNotice('success', `Đã xóa toàn bộ Track #${trackIdToDelete}`);
   }, [annotationData, selectedTrackId, updateDataWithHistory]);
 
   // Rename Track ID with 3 Scopes (T-101)
@@ -332,7 +517,7 @@ export default function App() {
     });
     setSelectedTrackId(renameTargetId);
     setShowRenameModal(false);
-    showNotice('success', `Đã đổi Track #${selectedTrackId} ➔ #${renameTargetId} (${renameScope === 'current' ? 'Chỉ frame này' : renameScope === 'onwards' ? 'Từ frame này về sau' : 'Toàn clip'})`);
+    showNotice('success', `Đã đổi Track #${selectedTrackId} ➔ #${renameTargetId}`);
   };
 
   // Merge Tracks (T-102)
@@ -344,13 +529,11 @@ export default function App() {
     }
 
     const updatedFrames = annotationData.frames.map((f) => {
-      // Check if both exist in the same frame
       const hasDest = f.objects.some(obj => obj.track_id === mergeDestId);
       return {
         ...f,
         objects: f.objects.map((obj) => {
           if (obj.track_id !== mergeSourceId) return obj;
-          // If destination already exists in this frame, keep dest, or reassign
           if (hasDest) return obj;
           return {
             ...obj,
@@ -370,7 +553,7 @@ export default function App() {
     showNotice('success', `Đã gộp Track #${mergeSourceId} vào Track #${mergeDestId}`);
   };
 
-  // Change class of selected BBox (T-089)
+  // Change class (T-089)
   const handleChangeSelectedClass = useCallback((newClassName: string) => {
     if (!annotationData || selectedTrackId === null) return;
     const updatedFrames = annotationData.frames.map((f) => {
@@ -445,7 +628,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleDeleteSelectedBox, handleChangeSelectedClass, handleUndo, handleRedo, selectedTrackId, annotationData]);
 
-  // Stage Mouse Handlers for Drawing New BBox (T-087)
+  // Drawing BBox handlers (T-087)
   const handleStageMouseDown = (e: any) => {
     if (toolMode !== 'draw') {
       if (e.target === e.target.getStage()) {
@@ -546,7 +729,7 @@ export default function App() {
     });
   };
 
-  // Transform / Resize End handler (T-086)
+  // Transform End handler (T-086)
   const handleBoxTransformEnd = (trackId: number) => {
     if (!annotationData) return;
     const node = shapeRefs.current.get(trackId);
@@ -682,6 +865,7 @@ export default function App() {
   };
 
   const selectedObject = currentObjects.find(obj => obj.track_id === selectedTrackId);
+  const currentFrameFlags = (annotationData?.flags || []).filter(fl => fl.frame === currentFrame);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: '#0f172a' }}>
@@ -720,17 +904,10 @@ export default function App() {
           }}>
             <button
               onClick={() => setAnnotationMode('track')}
-              title="Chế độ Track: Dành cho Video có liên kết thời gian & ID theo vết"
+              title="Chế độ Track: Video liên kết ID theo thời gian"
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '5px',
-                padding: '4px 10px',
-                borderRadius: '5px',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: '12px',
-                fontWeight: 600,
+                display: 'flex', alignItems: 'center', gap: '5px', padding: '4px 10px', borderRadius: '5px',
+                border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: 600,
                 backgroundColor: annotationMode === 'track' ? '#3b82f6' : 'transparent',
                 color: annotationMode === 'track' ? '#fff' : '#94a3b8'
               }}
@@ -739,17 +916,10 @@ export default function App() {
             </button>
             <button
               onClick={() => setAnnotationMode('shape')}
-              title="Chế độ Shape: Dành cho Ảnh tĩnh đơn lập, BBox độc lập"
+              title="Chế độ Shape: Ảnh tĩnh BBox độc lập"
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '5px',
-                padding: '4px 10px',
-                borderRadius: '5px',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: '12px',
-                fontWeight: 600,
+                display: 'flex', alignItems: 'center', gap: '5px', padding: '4px 10px', borderRadius: '5px',
+                border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: 600,
                 backgroundColor: annotationMode === 'shape' ? '#10b981' : 'transparent',
                 color: annotationMode === 'shape' ? '#fff' : '#94a3b8'
               }}
@@ -767,13 +937,8 @@ export default function App() {
               value={currentSampleId}
               onChange={(e) => setCurrentSampleId(e.target.value)}
               style={{
-                backgroundColor: '#0f172a',
-                color: '#f8fafc',
-                border: '1px solid #334155',
-                borderRadius: '6px',
-                padding: '4px 8px',
-                fontSize: '13px',
-                cursor: 'pointer'
+                backgroundColor: '#0f172a', color: '#f8fafc', border: '1px solid #334155',
+                borderRadius: '6px', padding: '4px 8px', fontSize: '13px', cursor: 'pointer'
               }}
             >
               <option value="sample_traffic_demo">Video mẫu (120 frames)</option>
@@ -786,36 +951,40 @@ export default function App() {
                 ))}
             </select>
           </div>
+
+          {/* Review Status Badge (EP-09) */}
+          {annotationData && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '6px',
+              backgroundColor: reviewStats.percent === 100 ? '#064e3b' : '#1e293b',
+              border: reviewStats.percent === 100 ? '1px solid #10b981' : '1px solid #475569',
+              padding: '2px 8px', borderRadius: '4px', fontSize: '11px',
+              color: reviewStats.percent === 100 ? '#34d399' : '#94a3b8'
+            }}>
+              <ShieldCheck size={13} />
+              {reviewStats.percent === 100 ? 'Verified 100%' : `Tiến độ duyệt: ${reviewStats.percent}% (${reviewStats.verified}/${reviewStats.total})`}
+            </div>
+          )}
         </div>
 
         {/* Action Controls */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           {/* Undo / Redo */}
           <button
-            onClick={handleUndo}
-            disabled={historyIndex <= 0}
-            title="Hoàn tác (Ctrl+Z)"
+            onClick={handleUndo} disabled={historyIndex <= 0} title="Hoàn tác (Ctrl+Z)"
             style={{
-              backgroundColor: '#334155',
-              color: historyIndex <= 0 ? '#64748b' : '#f8fafc',
-              border: '1px solid #475569',
-              padding: '6px 8px',
-              borderRadius: '6px',
+              backgroundColor: '#334155', color: historyIndex <= 0 ? '#64748b' : '#f8fafc',
+              border: '1px solid #475569', padding: '6px 8px', borderRadius: '6px',
               cursor: historyIndex <= 0 ? 'not-allowed' : 'pointer'
             }}
           >
             <Undo2 size={15} />
           </button>
           <button
-            onClick={handleRedo}
-            disabled={historyIndex >= history.length - 1}
-            title="Làm lại (Ctrl+Y)"
+            onClick={handleRedo} disabled={historyIndex >= history.length - 1} title="Làm lại (Ctrl+Y)"
             style={{
-              backgroundColor: '#334155',
-              color: historyIndex >= history.length - 1 ? '#64748b' : '#f8fafc',
-              border: '1px solid #475569',
-              padding: '6px 8px',
-              borderRadius: '6px',
+              backgroundColor: '#334155', color: historyIndex >= history.length - 1 ? '#64748b' : '#f8fafc',
+              border: '1px solid #475569', padding: '6px 8px', borderRadius: '6px',
               cursor: historyIndex >= history.length - 1 ? 'not-allowed' : 'pointer'
             }}
           >
@@ -828,17 +997,9 @@ export default function App() {
           <button
             onClick={() => setShowUploadModal(true)}
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              backgroundColor: '#334155',
-              color: '#f8fafc',
-              border: '1px solid #475569',
-              padding: '6px 12px',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              fontWeight: 500,
-              fontSize: '13px'
+              display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#334155',
+              color: '#f8fafc', border: '1px solid #475569', padding: '6px 12px',
+              borderRadius: '6px', cursor: 'pointer', fontWeight: 500, fontSize: '13px'
             }}
           >
             <Upload size={14} /> Upload Video / ZIP
@@ -846,20 +1007,11 @@ export default function App() {
 
           {/* Auto-Label Button */}
           <button
-            onClick={handleAutoLabel}
-            disabled={isAutoLabeling}
+            onClick={handleAutoLabel} disabled={isAutoLabeling}
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              backgroundColor: '#7c3aed',
-              color: '#ffffff',
-              border: 'none',
-              padding: '6px 14px',
-              borderRadius: '6px',
-              cursor: isAutoLabeling ? 'not-allowed' : 'pointer',
-              fontWeight: 600,
-              fontSize: '13px'
+              display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#7c3aed',
+              color: '#ffffff', border: 'none', padding: '6px 14px', borderRadius: '6px',
+              cursor: isAutoLabeling ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '13px'
             }}
           >
             <Sparkles size={14} />
@@ -870,17 +1022,9 @@ export default function App() {
           <button
             onClick={handleSaveToBackend}
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              backgroundColor: '#059669',
-              color: '#ffffff',
-              border: 'none',
-              padding: '6px 12px',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              fontWeight: 500,
-              fontSize: '13px'
+              display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#059669',
+              color: '#ffffff', border: 'none', padding: '6px 12px', borderRadius: '6px',
+              cursor: 'pointer', fontWeight: 500, fontSize: '13px'
             }}
           >
             <Save size={14} /> Lưu
@@ -890,17 +1034,9 @@ export default function App() {
           <button
             onClick={handleExportJSON}
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              backgroundColor: '#2563eb',
-              color: '#ffffff',
-              border: 'none',
-              padding: '6px 14px',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              fontWeight: 500,
-              fontSize: '13px'
+              display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#2563eb',
+              color: '#ffffff', border: 'none', padding: '6px 14px', borderRadius: '6px',
+              cursor: 'pointer', fontWeight: 500, fontSize: '13px'
             }}
           >
             <Download size={14} /> Export JSON
@@ -908,23 +1044,68 @@ export default function App() {
         </div>
       </header>
 
+      {/* Manual Flag Note Modal (T-120) */}
+      {showFlagModal && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
+        }}>
+          <div style={{
+            width: '400px', backgroundColor: '#1e293b', borderRadius: '12px',
+            border: '1px solid #475569', padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontWeight: 700, fontSize: '15px', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Flag size={16} color="#f59e0b" /> Cắm cờ Frame #{currentFrame}
+              </span>
+              <button onClick={() => setShowFlagModal(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <label style={{ fontSize: '12px', color: '#cbd5e1' }}>Ghi chú lỗi cần xem lại:</label>
+              <textarea
+                rows={3}
+                value={flagNote}
+                onChange={(e) => setFlagNote(e.target.value)}
+                placeholder="VD: Xe bị cột đèn che khuất, cần vẽ lại BBox..."
+                style={{
+                  backgroundColor: '#0f172a', border: '1px solid #475569', borderRadius: '6px',
+                  padding: '8px 12px', color: '#f8fafc', fontSize: '13px', resize: 'none'
+                }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button
+                onClick={() => setShowFlagModal(false)}
+                style={{ backgroundColor: '#334155', border: 'none', color: '#fff', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer' }}
+              >
+                Hủy
+              </button>
+              <button
+                onClick={handleAddManualFlag}
+                style={{ backgroundColor: '#f59e0b', border: 'none', color: '#000', padding: '6px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}
+              >
+                Lưu cờ
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Rename Track Modal (T-101) */}
       {showRenameModal && (
         <div style={{
-          position: 'fixed',
-          top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.7)',
-          backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 1000
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
         }}>
           <div style={{
-            width: '420px',
-            backgroundColor: '#1e293b',
-            borderRadius: '12px',
-            border: '1px solid #475569',
-            padding: '20px',
-            display: 'flex', flexDirection: 'column', gap: '16px'
+            width: '420px', backgroundColor: '#1e293b', borderRadius: '12px',
+            border: '1px solid #475569', padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px'
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontWeight: 700, fontSize: '15px', color: '#f8fafc' }}>
@@ -942,64 +1123,33 @@ export default function App() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               <label style={{ fontSize: '12px', color: '#cbd5e1', fontWeight: 600 }}>Track ID mới:</label>
               <input
-                type="number"
-                min="1"
-                value={renameTargetId}
+                type="number" min="1" value={renameTargetId}
                 onChange={(e) => setRenameTargetId(Number(e.target.value))}
-                style={{
-                  backgroundColor: '#0f172a',
-                  border: '1px solid #475569',
-                  borderRadius: '6px',
-                  padding: '8px 12px',
-                  color: '#f8fafc',
-                  fontSize: '14px'
-                }}
+                style={{ backgroundColor: '#0f172a', border: '1px solid #475569', borderRadius: '6px', padding: '8px 12px', color: '#f8fafc', fontSize: '14px' }}
               />
             </div>
 
-            {/* Scope Selection */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <label style={{ fontSize: '12px', color: '#cbd5e1', fontWeight: 600 }}>Phạm vi áp dụng:</label>
               <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#f8fafc', cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="scope"
-                  checked={renameScope === 'onwards'}
-                  onChange={() => setRenameScope('onwards')}
-                />
+                <input type="radio" name="scope" checked={renameScope === 'onwards'} onChange={() => setRenameScope('onwards')} />
                 <b>Từ frame này trở về sau ({currentFrame} ➔ hết)</b> - Sửa ID switch
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#cbd5e1', cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="scope"
-                  checked={renameScope === 'current'}
-                  onChange={() => setRenameScope('current')}
-                />
+                <input type="radio" name="scope" checked={renameScope === 'current'} onChange={() => setRenameScope('current')} />
                 Chỉ ở frame hiện tại ({currentFrame})
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#cbd5e1', cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="scope"
-                  checked={renameScope === 'all'}
-                  onChange={() => setRenameScope('all')}
-                />
+                <input type="radio" name="scope" checked={renameScope === 'all'} onChange={() => setRenameScope('all')} />
                 Toàn bộ video (Tất cả frame của track #{selectedTrackId})
               </label>
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
-              <button
-                onClick={() => setShowRenameModal(false)}
-                style={{ backgroundColor: '#334155', border: 'none', color: '#fff', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer' }}
-              >
+              <button onClick={() => setShowRenameModal(false)} style={{ backgroundColor: '#334155', border: 'none', color: '#fff', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer' }}>
                 Hủy
               </button>
-              <button
-                onClick={handleExecuteRenameTrack}
-                style={{ backgroundColor: '#2563eb', border: 'none', color: '#fff', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}
-              >
+              <button onClick={handleExecuteRenameTrack} style={{ backgroundColor: '#2563eb', border: 'none', color: '#fff', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
                 Xác nhận đổi ID
               </button>
             </div>
@@ -1010,20 +1160,13 @@ export default function App() {
       {/* Merge Track Modal (T-102) */}
       {showMergeModal && (
         <div style={{
-          position: 'fixed',
-          top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.7)',
-          backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 1000
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
         }}>
           <div style={{
-            width: '440px',
-            backgroundColor: '#1e293b',
-            borderRadius: '12px',
-            border: '1px solid #475569',
-            padding: '20px',
-            display: 'flex', flexDirection: 'column', gap: '16px'
+            width: '440px', backgroundColor: '#1e293b', borderRadius: '12px',
+            border: '1px solid #475569', padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px'
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontWeight: 700, fontSize: '15px', color: '#f8fafc' }}>
@@ -1041,8 +1184,7 @@ export default function App() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               <label style={{ fontSize: '12px', color: '#cbd5e1' }}>Track nguồn (sẽ bị gộp):</label>
               <select
-                value={mergeSourceId || ''}
-                onChange={(e) => setMergeSourceId(Number(e.target.value))}
+                value={mergeSourceId || ''} onChange={(e) => setMergeSourceId(Number(e.target.value))}
                 style={{ backgroundColor: '#0f172a', color: '#fff', border: '1px solid #475569', padding: '8px', borderRadius: '6px' }}
               >
                 {allTracksSummary.map(t => (
@@ -1054,8 +1196,7 @@ export default function App() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               <label style={{ fontSize: '12px', color: '#cbd5e1' }}>Gộp vào Track đích:</label>
               <select
-                value={mergeDestId || ''}
-                onChange={(e) => setMergeDestId(Number(e.target.value))}
+                value={mergeDestId || ''} onChange={(e) => setMergeDestId(Number(e.target.value))}
                 style={{ backgroundColor: '#0f172a', color: '#fff', border: '1px solid #475569', padding: '8px', borderRadius: '6px' }}
               >
                 {allTracksSummary.filter(t => t.track_id !== mergeSourceId).map(t => (
@@ -1065,16 +1206,10 @@ export default function App() {
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
-              <button
-                onClick={() => setShowMergeModal(false)}
-                style={{ backgroundColor: '#334155', border: 'none', color: '#fff', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer' }}
-              >
+              <button onClick={() => setShowMergeModal(false)} style={{ backgroundColor: '#334155', border: 'none', color: '#fff', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer' }}>
                 Hủy
               </button>
-              <button
-                onClick={handleExecuteMergeTrack}
-                style={{ backgroundColor: '#7c3aed', border: 'none', color: '#fff', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}
-              >
+              <button onClick={handleExecuteMergeTrack} style={{ backgroundColor: '#7c3aed', border: 'none', color: '#fff', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>
                 Gộp 2 Track
               </button>
             </div>
@@ -1085,20 +1220,13 @@ export default function App() {
       {/* Upload Dialog Modal (T-017) */}
       {showUploadModal && (
         <div style={{
-          position: 'fixed',
-          top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'rgba(0, 0, 0, 0.7)',
-          backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 1000
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.7)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
         }}>
           <div style={{
-            width: '500px',
-            backgroundColor: '#1e293b',
-            borderRadius: '12px',
-            border: '1px solid #475569',
-            boxShadow: '0 20px 40px rgba(0,0,0,0.5)',
-            overflow: 'hidden'
+            width: '500px', backgroundColor: '#1e293b', borderRadius: '12px',
+            border: '1px solid #475569', boxShadow: '0 20px 40px rgba(0,0,0,0.5)', overflow: 'hidden'
           }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid #334155' }}>
               <span style={{ fontWeight: 600, fontSize: '15px', color: '#f8fafc' }}>
@@ -1112,8 +1240,7 @@ export default function App() {
             <form onSubmit={handleSubmitUpload} style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div style={{ display: 'flex', gap: '8px', backgroundColor: '#0f172a', padding: '4px', borderRadius: '8px' }}>
                 <button
-                  type="button"
-                  onClick={() => { setUploadType('video'); setSelectedFile(null); }}
+                  type="button" onClick={() => { setUploadType('video'); setSelectedFile(null); }}
                   style={{
                     flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '8px',
                     borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '13px', fontWeight: 600,
@@ -1123,8 +1250,7 @@ export default function App() {
                   <Film size={15} /> Video (.mp4, .avi, .mov)
                 </button>
                 <button
-                  type="button"
-                  onClick={() => { setUploadType('image_sequence'); setSelectedFile(null); }}
+                  type="button" onClick={() => { setUploadType('image_sequence'); setSelectedFile(null); }}
                   style={{
                     flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '8px',
                     borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '13px', fontWeight: 600,
@@ -1149,8 +1275,7 @@ export default function App() {
                   {uploadType === 'video' ? 'Hỗ trợ .mp4, .avi, .mov (tối đa 2GB)' : 'Đóng gói các ảnh .jpg, .png cùng kích thước vào 1 file .zip'}
                 </div>
                 <input
-                  type="file"
-                  ref={fileInputRef}
+                  type="file" ref={fileInputRef}
                   onChange={(e) => { if (e.target.files?.[0]) setSelectedFile(e.target.files[0]); }}
                   accept={uploadType === 'video' ? 'video/mp4,video/avi,video/quicktime' : '.zip,application/zip'}
                   style={{ display: 'none' }}
@@ -1245,6 +1370,46 @@ export default function App() {
             </div>
           </div>
 
+          {/* Review Actions (EP-09) */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', backgroundColor: '#0f172a', padding: '10px', borderRadius: '8px', border: '1px solid #334155' }}>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <ShieldCheck size={13} /> Quy trình Review (EP-09)
+            </div>
+            
+            <button
+              onClick={handleToggleConfirmCurrentFrame}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                padding: '6px', borderRadius: '5px', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: 600,
+                backgroundColor: isCurrentFrameVerified ? '#059669' : '#334155', color: '#fff'
+              }}
+            >
+              <CheckCheck size={14} /> {isCurrentFrameVerified ? 'Đã duyệt Frame này' : 'Duyệt Frame này (T-121)'}
+            </button>
+
+            <button
+              onClick={() => setShowFlagModal(true)}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                padding: '6px', borderRadius: '5px', border: '1px solid #f59e0b', cursor: 'pointer', fontSize: '12px', fontWeight: 600,
+                backgroundColor: 'transparent', color: '#f59e0b'
+              }}
+            >
+              <Flag size={14} /> Cắm cờ Frame (T-120)
+            </button>
+
+            <button
+              onClick={handleAutoScanIssues}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                padding: '6px', borderRadius: '5px', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: 600,
+                backgroundColor: '#b45309', color: '#fff'
+              }}
+            >
+              <AlertTriangle size={14} /> Quét lỗi tự động (T-123)
+            </button>
+          </div>
+
           {/* Motion Trail Toggle (Only in Track Mode) */}
           {annotationMode === 'track' && (
             <div style={{
@@ -1252,7 +1417,7 @@ export default function App() {
               backgroundColor: '#0f172a', padding: '8px 10px', borderRadius: '6px', border: '1px solid #334155'
             }}>
               <span style={{ fontSize: '12px', color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <Waypoints size={14} color="#38bdf8" /> Hiện Vệt Quỹ Đạo (T-107)
+                <Waypoints size={14} color="#38bdf8" /> Hiện Vệt Quỹ Đạo
               </span>
               <button
                 onClick={() => setShowMotionTrail(!showMotionTrail)}
@@ -1298,19 +1463,6 @@ export default function App() {
               );
             })}
           </div>
-
-          <div style={{ marginTop: 'auto', padding: '12px', backgroundColor: '#0f172a', borderRadius: '8px', border: '1px solid #334155' }}>
-            <div style={{ fontSize: '12px', color: '#38bdf8', fontWeight: 600 }}>
-              ⌨️ Phím tắt nhanh:
-            </div>
-            <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px', lineHeight: 1.6 }}>
-              • <b>1 - 6</b>: Đổi class đang chọn<br />
-              • <b>Delete</b>: Xóa box đang chọn<br />
-              • <b>Ctrl + Z / Y</b>: Undo / Redo<br />
-              • <b>Space</b>: Play / Pause<br />
-              • <b>← / →</b>: Chuyển frame
-            </div>
-          </div>
         </aside>
 
         {/* Center: Konva Canvas Viewport */}
@@ -1322,10 +1474,23 @@ export default function App() {
           justifyContent: 'center',
           backgroundColor: '#090d16',
           padding: '16px',
-          cursor: toolMode === 'draw' ? 'crosshair' : 'default'
+          cursor: toolMode === 'draw' ? 'crosshair' : 'default',
+          position: 'relative'
         }}>
+          {/* Frame Flag Indicator Overlay */}
+          {currentFrameFlags.length > 0 && (
+            <div style={{
+              position: 'absolute', top: '24px', left: '24px', zIndex: 5,
+              backgroundColor: 'rgba(245, 158, 11, 0.9)', color: '#000',
+              padding: '6px 12px', borderRadius: '6px', fontWeight: 600, fontSize: '12px',
+              display: 'flex', alignItems: 'center', gap: '6px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+            }}>
+              <Flag size={14} /> Có {currentFrameFlags.length} cờ cảnh báo tại frame này!
+            </div>
+          )}
+
           <div style={{
-            border: '2px solid #334155',
+            border: isCurrentFrameVerified ? '2px solid #10b981' : '2px solid #334155',
             borderRadius: '8px',
             overflow: 'hidden',
             boxShadow: '0 10px 25px rgba(0,0,0,0.5)',
@@ -1359,7 +1524,7 @@ export default function App() {
                   />
                 )}
 
-                {/* Motion Trail (T-107): draw trajectory of selected track across frames */}
+                {/* Motion Trail (T-107) */}
                 {trajectoryLinePoints.length > 2 && (
                   <>
                     <Line
@@ -1414,7 +1579,6 @@ export default function App() {
                         cornerRadius={2}
                       />
 
-                      {/* Header Chip: Track mode shows '#ID Class', Shape mode shows 'Class' */}
                       <Rect
                         x={x * scale}
                         y={Math.max(0, y * scale - 22)}
@@ -1472,9 +1636,9 @@ export default function App() {
           </div>
         </main>
 
-        {/* Right Inspector: Track Management & Object Details */}
+        {/* Right Inspector: 3 Tabs (Frame Objects, All Tracks, Review & Flags) */}
         <aside style={{
-          width: '300px',
+          width: '320px',
           backgroundColor: '#1e293b',
           borderLeft: '1px solid #334155',
           padding: '16px',
@@ -1482,33 +1646,43 @@ export default function App() {
           flexDirection: 'column',
           gap: '12px'
         }}>
-          {/* Tab Selector: Current Frame Objects vs All Tracks in Video */}
-          {annotationMode === 'track' && (
-            <div style={{ display: 'flex', gap: '4px', backgroundColor: '#0f172a', padding: '3px', borderRadius: '6px' }}>
-              <button
-                onClick={() => setRightTab('frame')}
-                style={{
-                  flex: 1, padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer',
-                  fontSize: '11px', fontWeight: 600,
-                  backgroundColor: rightTab === 'frame' ? '#334155' : 'transparent',
-                  color: rightTab === 'frame' ? '#f8fafc' : '#94a3b8'
-                }}
-              >
-                Frame này ({currentObjects.length})
-              </button>
-              <button
-                onClick={() => setRightTab('tracks')}
-                style={{
-                  flex: 1, padding: '6px', borderRadius: '4px', border: 'none', cursor: 'pointer',
-                  fontSize: '11px', fontWeight: 600,
-                  backgroundColor: rightTab === 'tracks' ? '#334155' : 'transparent',
-                  color: rightTab === 'tracks' ? '#f8fafc' : '#94a3b8'
-                }}
-              >
-                Tất cả Tracks ({allTracksSummary.length})
-              </button>
-            </div>
-          )}
+          {/* Tab Selector */}
+          <div style={{ display: 'flex', gap: '3px', backgroundColor: '#0f172a', padding: '3px', borderRadius: '6px' }}>
+            <button
+              onClick={() => setRightTab('frame')}
+              style={{
+                flex: 1, padding: '6px 4px', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                fontSize: '11px', fontWeight: 600,
+                backgroundColor: rightTab === 'frame' ? '#334155' : 'transparent',
+                color: rightTab === 'frame' ? '#f8fafc' : '#94a3b8'
+              }}
+            >
+              Frame ({currentObjects.length})
+            </button>
+            <button
+              onClick={() => setRightTab('tracks')}
+              style={{
+                flex: 1, padding: '6px 4px', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                fontSize: '11px', fontWeight: 600,
+                backgroundColor: rightTab === 'tracks' ? '#334155' : 'transparent',
+                color: rightTab === 'tracks' ? '#f8fafc' : '#94a3b8'
+              }}
+            >
+              Tracks ({allTracksSummary.length})
+            </button>
+            <button
+              onClick={() => setRightTab('review')}
+              style={{
+                flex: 1, padding: '6px 4px', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                fontSize: '11px', fontWeight: 600,
+                backgroundColor: rightTab === 'review' ? '#334155' : 'transparent',
+                color: rightTab === 'review' ? (reviewStats.openFlags > 0 ? '#f59e0b' : '#34d399') : '#94a3b8',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '3px'
+              }}
+            >
+              <Flag size={11} /> Cờ lỗi ({reviewStats.openFlags})
+            </button>
+          </div>
 
           {/* Selected Object Detail Panel */}
           {selectedObject ? (
@@ -1555,7 +1729,7 @@ export default function App() {
                 </select>
               </div>
 
-              {/* Advanced Track Management Tools (Only in Track Mode) */}
+              {/* Track Management Tools */}
               {annotationMode === 'track' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px', borderTop: '1px solid #334155', paddingTop: '8px' }}>
                   <div style={{ display: 'flex', gap: '6px' }}>
@@ -1601,16 +1775,10 @@ export default function App() {
                 </div>
               )}
             </div>
-          ) : (
-            <div style={{
-              backgroundColor: '#0f172a', borderRadius: '8px', padding: '12px', textAlign: 'center', fontSize: '12px', color: '#64748b'
-            }}>
-              {annotationMode === 'track' ? 'Bấm vào một Track để sửa ID, gộp hoặc co giãn' : 'Bấm vào một Shape để sửa kích thước hoặc đổi class'}
-            </div>
-          )}
+          ) : null}
 
-          {/* Right tab content: Frame Objects */}
-          {rightTab === 'frame' ? (
+          {/* Tab 1: Current Frame Objects */}
+          {rightTab === 'frame' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto', flex: 1 }}>
               <div style={{ fontSize: '11px', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>
                 Đối tượng tại Frame {currentFrame}
@@ -1655,8 +1823,10 @@ export default function App() {
                 })
               )}
             </div>
-          ) : (
-            /* All Tracks List Overview (T-100) */
+          )}
+
+          {/* Tab 2: All Tracks List (T-100) */}
+          {rightTab === 'tracks' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto', flex: 1 }}>
               <div style={{ fontSize: '11px', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>
                 Danh sách Tất cả Tracks ({allTracksSummary.length})
@@ -1669,7 +1839,6 @@ export default function App() {
                     key={t.track_id}
                     onClick={() => {
                       setSelectedTrackId(t.track_id);
-                      // Jump to first frame of this track if current frame doesn't contain it
                       const existsInCurrent = currentObjects.some(o => o.track_id === t.track_id);
                       if (!existsInCurrent) setCurrentFrame(t.firstFrame);
                     }}
@@ -1701,6 +1870,93 @@ export default function App() {
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {/* Tab 3: Review & Problematic Frames List (T-122) */}
+          {rightTab === 'review' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto', flex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: '11px', fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase' }}>
+                  Cờ cảnh báo & Review
+                </span>
+                <button
+                  onClick={handleConfirmAllFrames}
+                  style={{
+                    backgroundColor: '#059669', color: '#fff', border: 'none', padding: '3px 8px',
+                    borderRadius: '4px', fontSize: '10px', cursor: 'pointer', fontWeight: 600
+                  }}
+                >
+                  Confirm All
+                </button>
+              </div>
+
+              {(annotationData?.flags || []).length === 0 ? (
+                <div style={{ fontSize: '12px', color: '#64748b', textAlign: 'center', marginTop: '20px' }}>
+                  Chưa có cờ cảnh báo nào.<br />
+                  <button
+                    onClick={handleAutoScanIssues}
+                    style={{
+                      marginTop: '8px', backgroundColor: '#334155', color: '#38bdf8', border: '1px solid #475569',
+                      padding: '4px 10px', borderRadius: '4px', fontSize: '11px', cursor: 'pointer'
+                    }}
+                  >
+                    Bấm để quét lỗi tự động
+                  </button>
+                </div>
+              ) : (
+                (annotationData?.flags || []).map((fl) => (
+                  <div
+                    key={fl.id}
+                    onClick={() => {
+                      setCurrentFrame(fl.frame);
+                      if (fl.track_id) setSelectedTrackId(fl.track_id);
+                    }}
+                    style={{
+                      padding: '8px 10px', borderRadius: '6px',
+                      border: fl.resolved ? '1px solid #334155' : '1px solid #f59e0b',
+                      backgroundColor: fl.resolved ? '#0f172a' : '#1e1b18',
+                      cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: '4px'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{
+                        fontWeight: 600, fontSize: '11px',
+                        color: fl.resolved ? '#94a3b8' : '#f59e0b',
+                        display: 'flex', alignItems: 'center', gap: '4px'
+                      }}>
+                        <Flag size={12} /> Frame #{fl.frame} {fl.track_id ? `(Track #${fl.track_id})` : ''}
+                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleToggleResolveFlag(fl.id);
+                          }}
+                          style={{
+                            fontSize: '10px', padding: '2px 6px', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                            backgroundColor: fl.resolved ? '#334155' : '#059669', color: '#fff'
+                          }}
+                        >
+                          {fl.resolved ? 'Mở lại' : 'Đã sửa'}
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteFlag(fl.id);
+                          }}
+                          style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: '2px' }}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: '11px', color: fl.resolved ? '#64748b' : '#cbd5e1', lineHeight: 1.4 }}>
+                      {fl.issue}
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           )}
         </aside>
@@ -1763,8 +2019,13 @@ export default function App() {
           />
         </div>
 
-        {/* Frame Display */}
-        <div style={{ fontSize: '13px', fontWeight: 600, color: '#f8fafc', minWidth: '120px', textAlign: 'right' }}>
+        {/* Frame Display with Verified Check */}
+        <div style={{ fontSize: '13px', fontWeight: 600, color: '#f8fafc', minWidth: '150px', textAlign: 'right', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '6px' }}>
+          {isCurrentFrameVerified && (
+            <span title="Frame đã được duyệt" style={{ display: 'inline-flex', alignItems: 'center' }}>
+              <CheckCircle2 size={16} color="#10b981" />
+            </span>
+          )}
           Frame: <span style={{ color: '#38bdf8' }}>{currentFrame}</span> / {(annotationData?.info.frame_count || 1) - 1}
         </div>
       </footer>

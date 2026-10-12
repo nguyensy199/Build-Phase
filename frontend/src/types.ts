@@ -19,6 +19,17 @@ export interface BBoxObject {
 export interface FrameAnnotation {
   frame: number;
   objects: BBoxObject[];
+  verified?: boolean;
+}
+
+export interface ReviewFlag {
+  id: string;
+  frame: number;
+  track_id?: number;
+  type: "auto" | "manual";
+  issue: string;
+  note?: string;
+  resolved: boolean;
 }
 
 export interface SampleInfo {
@@ -34,10 +45,12 @@ export interface SampleInfo {
   exported_at?: string;
   model_version?: string;
   tracker?: string;
+  review_status?: "unreviewed" | "in_progress" | "verified";
 }
 
 export interface SampleAnnotationData {
   info: SampleInfo;
   classes: string[];
   frames: FrameAnnotation[];
+  flags?: ReviewFlag[];
 }
