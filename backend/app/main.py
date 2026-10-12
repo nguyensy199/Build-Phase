@@ -12,7 +12,14 @@ from typing import Any
 import cv2
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
+from app.exporters import (
+    export_json_format,
+    export_mot_challenge,
+    export_coco_format,
+    export_yolo_zip,
+    validate_annotation_schema
+)
 
 # Ensure root directory is on sys.path for ai module imports
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -366,6 +373,151 @@ def run_auto_label(sample_id: str, tracker_type: str = "botsort", conf: float = 
     except Exception as e:
         logger.error(f"Lỗi AI tracking: {e}")
         raise HTTPException(status_code=500, detail=f"Lỗi khi chạy AI auto-label: {str(e)}")
+
+
+# ==========================================
+# EP-10: EXPORT & IMPORT DATASET APIS (T-130, T-131, T-132, T-133)
+# ==========================================
+
+def _load_sample_annotation_for_export(sample_id: str) -> dict:
+    det_file = settings.DETECTIONS_PATH / f"{sample_id}.json"
+    if not det_file.exists():
+        mock_file = settings.CONFIGS_PATH / "sample_annotation.json"
+        if mock_file.exists():
+            with open(mock_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy dữ liệu annotation cho sample {sample_id}")
+    with open(det_file, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+@app.get(f"{settings.API_V1_STR}/samples/{{sample_id}}/export/json", tags=["Export"])
+def export_annotation_json(
+    sample_id: str,
+    verified_only: bool = False,
+    download: bool = True
+):
+    """
+    T-130 (EXP-01..06): Export standard frame-based JSON format.
+    Guarantees: 0-based frame indices, [x,y,w,h] pixel coordinates, strict JSON Schema compliance.
+    """
+    data = _load_sample_annotation_for_export(sample_id)
+    verified_frames = data.get("info", {}).get("verified_frames", [])
+    
+    exported = export_json_format(data, verified_only=verified_only, verified_frames=verified_frames)
+    is_valid, msg = validate_annotation_schema(exported)
+    if not is_valid:
+        logger.warning(f"Schema validation warning for {sample_id}: {msg}")
+
+    content = json.dumps(exported, indent=2, ensure_ascii=False)
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{sample_id}_groundtruth.json"'
+    return Response(content=content, media_type="application/json", headers=headers)
+
+@app.get(f"{settings.API_V1_STR}/samples/{{sample_id}}/export/mot", tags=["Export"])
+def export_annotation_mot(
+    sample_id: str,
+    verified_only: bool = False
+):
+    """
+    T-131 (EXP-08): Export MOTChallenge format txt file.
+    Format: <frame_1based>,<track_id>,<bb_left>,<bb_top>,<bb_width>,<bb_height>,<conf>,-1,-1,-1
+    """
+    data = _load_sample_annotation_for_export(sample_id)
+    verified_frames = data.get("info", {}).get("verified_frames", [])
+    
+    mot_text = export_mot_challenge(data, verified_only=verified_only, verified_frames=verified_frames)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{sample_id}_mot.txt"'
+    }
+    return Response(content=mot_text, media_type="text/plain; charset=utf-8", headers=headers)
+
+@app.get(f"{settings.API_V1_STR}/samples/{{sample_id}}/export/coco", tags=["Export"])
+def export_annotation_coco(
+    sample_id: str,
+    verified_only: bool = False
+):
+    """
+    Export COCO format JSON with images, annotations, categories.
+    """
+    data = _load_sample_annotation_for_export(sample_id)
+    verified_frames = data.get("info", {}).get("verified_frames", [])
+    
+    coco_data = export_coco_format(data, verified_only=verified_only, verified_frames=verified_frames)
+    content = json.dumps(coco_data, indent=2, ensure_ascii=False)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{sample_id}_coco.json"'
+    }
+    return Response(content=content, media_type="application/json", headers=headers)
+
+@app.get(f"{settings.API_V1_STR}/samples/{{sample_id}}/export/yolo", tags=["Export"])
+def export_annotation_yolo(
+    sample_id: str,
+    verified_only: bool = False
+):
+    """
+    Export YOLO format ZIP archive with labels/frame_*.txt and data.yaml.
+    """
+    data = _load_sample_annotation_for_export(sample_id)
+    verified_frames = data.get("info", {}).get("verified_frames", [])
+    
+    zip_bytes = export_yolo_zip(data, verified_only=verified_only, verified_frames=verified_frames)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{sample_id}_yolo.zip"'
+    }
+    return Response(content=zip_bytes, media_type="application/zip", headers=headers)
+
+@app.post(f"{settings.API_V1_STR}/samples/{{sample_id}}/import/json", tags=["Import"])
+async def import_annotation_json(
+    sample_id: str,
+    file: UploadFile = File(...)
+):
+    """
+    T-132 (EXP-07, DoD 12): Import annotation JSON (round-trip test).
+    Overwrites or restores annotations for sample_id and validates schema.
+    """
+    try:
+        content = await file.read()
+        new_data = json.loads(content.decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"File JSON không hợp lệ: {str(e)}")
+
+    if not isinstance(new_data, dict) or "frames" not in new_data:
+        raise HTTPException(status_code=400, detail="Cấu trúc JSON thiếu trường 'frames' bắt buộc")
+
+    # Validate against schema
+    is_valid, val_msg = validate_annotation_schema(new_data)
+    if not is_valid:
+        logger.warning(f"Cảnh báo schema import: {val_msg}")
+
+    det_file = settings.DETECTIONS_PATH / f"{sample_id}.json"
+    settings.DETECTIONS_PATH.mkdir(parents=True, exist_ok=True)
+    with open(det_file, "w", encoding="utf-8") as f:
+        json.dump(new_data, f, indent=2)
+
+    total_boxes = sum(len(f.get("objects", [])) for f in new_data.get("frames", []))
+
+    return {
+        "status": "success",
+        "sample_id": sample_id,
+        "total_frames": len(new_data.get("frames", [])),
+        "total_boxes": total_boxes,
+        "schema_valid": is_valid,
+        "schema_message": val_msg
+    }
+
+@app.get(f"{settings.API_V1_STR}/samples/{{sample_id}}/validate", tags=["Export"])
+def validate_sample_annotation(sample_id: str):
+    """
+    Validate current sample annotation against JSON Schema (EXP-06).
+    """
+    data = _load_sample_annotation_for_export(sample_id)
+    is_valid, msg = validate_annotation_schema(data)
+    return {
+        "sample_id": sample_id,
+        "valid": is_valid,
+        "message": msg
+    }
 
 if __name__ == "__main__":
     import uvicorn
