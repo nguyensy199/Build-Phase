@@ -5,7 +5,8 @@ import {
   Upload, Sparkles, Save, CheckCircle2, AlertCircle, RefreshCw, X, FolderOpen, Film, Images,
   Trash2, MousePointer, PlusCircle, Undo2, Redo2, 
   GitMerge, Edit3, Eye, EyeOff, Waypoints, BoxSelect,
-  Flag, CheckCheck, AlertTriangle, ShieldCheck
+  Flag, CheckCheck, AlertTriangle, ShieldCheck,
+  FileDown, FileUp, FileCheck, Zap
 } from 'lucide-react';
 import type { ClassConfig, SampleAnnotationData, BBoxObject, ReviewFlag } from './types';
 
@@ -63,6 +64,26 @@ export default function App() {
   const [showFlagModal, setShowFlagModal] = useState(false);
   const [flagNote, setFlagNote] = useState('');
 
+  // Export Modal states (T-133, EXP-09)
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState<'json' | 'mot' | 'coco' | 'yolo'>('json');
+  const [exportVerifiedOnly, setExportVerifiedOnly] = useState(false);
+  const [schemaValidationInfo, setSchemaValidationInfo] = useState<{ valid: boolean; message: string } | null>(null);
+
+  // Import Modal states (T-132, EXP-07, DoD 12)
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const importFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Keyframe & Interpolation states (EP-07, T-066, T-164)
+  const [keyframeStart, setKeyframeStart] = useState<{ frame: number; bbox: [number, number, number, number]; track_id: number } | null>(null);
+  const [keyframeEnd, setKeyframeEnd] = useState<{ frame: number; bbox: [number, number, number, number]; track_id: number } | null>(null);
+
+  // Autosave status (T-085.3, T-091)
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
+  const autosaveTimerRef = useRef<any>(null);
+
   // Upload Modal states (T-017)
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [uploadType, setUploadType] = useState<'video' | 'image_sequence'>('video');
@@ -89,7 +110,31 @@ export default function App() {
       return [...trimmed, newData];
     });
     setHistoryIndex(prev => prev + 1);
-  }, [historyIndex]);
+    setSaveStatus('unsaved');
+
+    // Debounce Autosave after 2 seconds (T-085.3, T-091)
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+    }
+    autosaveTimerRef.current = setTimeout(async () => {
+      if (!currentSampleId) return;
+      try {
+        setSaveStatus('saving');
+        const res = await fetch(`${API_BASE}/samples/${currentSampleId}/annotations`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newData)
+        });
+        if (res.ok) {
+          setSaveStatus('saved');
+        } else {
+          setSaveStatus('unsaved');
+        }
+      } catch {
+        setSaveStatus('unsaved');
+      }
+    }, 2000);
+  }, [historyIndex, currentSampleId]);
 
   const handleUndo = useCallback(() => {
     if (historyIndex > 0) {
@@ -578,6 +623,98 @@ export default function App() {
     showNotice('success', `Đã đổi class #${selectedTrackId} sang ${newClassName}`);
   }, [annotationData, selectedTrackId, currentFrame, updateDataWithHistory]);
 
+  // EP-07 / T-066 / T-164: Keyframe & Linear Interpolation Handlers
+  const handleSetStartKeyframe = () => {
+    if (!selectedObject) return;
+    setKeyframeStart({
+      frame: currentFrame,
+      bbox: [...selectedObject.bbox] as [number, number, number, number],
+      track_id: selectedObject.track_id
+    });
+    showNotice('success', `Đã đặt Keyframe A (Start) tại Frame #${currentFrame} cho Track #${selectedObject.track_id}`);
+  };
+
+  const handleSetEndKeyframe = () => {
+    if (!selectedObject) return;
+    setKeyframeEnd({
+      frame: currentFrame,
+      bbox: [...selectedObject.bbox] as [number, number, number, number],
+      track_id: selectedObject.track_id
+    });
+    showNotice('success', `Đã đặt Keyframe B (End) tại Frame #${currentFrame} cho Track #${selectedObject.track_id}`);
+  };
+
+  const handleResetKeyframes = () => {
+    setKeyframeStart(null);
+    setKeyframeEnd(null);
+    showNotice('success', 'Đã hủy đánh dấu Keyframe');
+  };
+
+  const handleExecuteInterpolate = () => {
+    if (!annotationData || !keyframeStart || !keyframeEnd) return;
+    if (keyframeStart.track_id !== keyframeEnd.track_id) {
+      showNotice('error', 'Hai keyframe phải thuộc cùng một Track ID!');
+      return;
+    }
+    if (keyframeStart.frame === keyframeEnd.frame) {
+      showNotice('error', 'Keyframe A và Keyframe B phải ở 2 frame khác nhau!');
+      return;
+    }
+
+    const fStart = Math.min(keyframeStart.frame, keyframeEnd.frame);
+    const fEnd = Math.max(keyframeStart.frame, keyframeEnd.frame);
+    const boxStart = keyframeStart.frame < keyframeEnd.frame ? keyframeStart.bbox : keyframeEnd.bbox;
+    const boxEnd = keyframeStart.frame < keyframeEnd.frame ? keyframeEnd.bbox : keyframeStart.bbox;
+    const targetTrackId = keyframeStart.track_id;
+
+    let trackClass = 'car';
+    const foundInCur = currentObjects.find(o => o.track_id === targetTrackId);
+    if (foundInCur) trackClass = foundInCur.class;
+
+    const totalSteps = fEnd - fStart;
+    const updatedFrames = annotationData.frames.map(f => {
+      if (f.frame <= fStart || f.frame >= fEnd) return f;
+
+      const t = (f.frame - fStart) / totalSteps;
+      const interpBox: [number, number, number, number] = [
+        Math.round(boxStart[0] + (boxEnd[0] - boxStart[0]) * t),
+        Math.round(boxStart[1] + (boxEnd[1] - boxStart[1]) * t),
+        Math.round(boxStart[2] + (boxEnd[2] - boxStart[2]) * t),
+        Math.round(boxStart[3] + (boxEnd[3] - boxStart[3]) * t),
+      ];
+
+      const existsIdx = f.objects.findIndex(o => o.track_id === targetTrackId);
+      let newObjects = [...f.objects];
+      if (existsIdx >= 0) {
+        newObjects[existsIdx] = {
+          ...newObjects[existsIdx],
+          bbox: interpBox,
+          source: 'interpolated'
+        };
+      } else {
+        newObjects.push({
+          track_id: targetTrackId,
+          class: trackClass,
+          bbox: interpBox,
+          confidence: 1.0,
+          source: 'interpolated'
+        });
+      }
+
+      return {
+        ...f,
+        objects: newObjects
+      };
+    });
+
+    updateDataWithHistory({
+      ...annotationData,
+      frames: updatedFrames
+    });
+
+    showNotice('success', `Đã tự động nội suy Track #${targetTrackId} qua ${totalSteps - 1} frame (từ #${fStart} đến #${fEnd})!`);
+  };
+
   // Keyboard shortcut listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -847,16 +984,81 @@ export default function App() {
     }
   };
 
-  // Export JSON
-  const handleExportJSON = () => {
-    if (!annotationData) return;
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(annotationData, null, 2));
-    const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute('href', dataStr);
-    downloadAnchor.setAttribute('download', `${annotationData.info.sample_id}_groundtruth.json`);
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
+  // EP-10: Export Dataset handler (T-130, T-131, T-133)
+  const handleExecuteExport = () => {
+    if (!currentSampleId) return;
+    let downloadUrl = '';
+    let filename = '';
+
+    if (exportFormat === 'json') {
+      downloadUrl = `${API_BASE}/samples/${currentSampleId}/export/json?verified_only=${exportVerifiedOnly}&download=true`;
+      filename = `${currentSampleId}_groundtruth.json`;
+    } else if (exportFormat === 'mot') {
+      downloadUrl = `${API_BASE}/samples/${currentSampleId}/export/mot?verified_only=${exportVerifiedOnly}`;
+      filename = `${currentSampleId}_mot.txt`;
+    } else if (exportFormat === 'coco') {
+      downloadUrl = `${API_BASE}/samples/${currentSampleId}/export/coco?verified_only=${exportVerifiedOnly}`;
+      filename = `${currentSampleId}_coco.json`;
+    } else if (exportFormat === 'yolo') {
+      downloadUrl = `${API_BASE}/samples/${currentSampleId}/export/yolo?verified_only=${exportVerifiedOnly}`;
+      filename = `${currentSampleId}_yolo.zip`;
+    }
+
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setShowExportModal(false);
+    showNotice('success', `Đang tải xuống dữ liệu định dạng [${exportFormat.toUpperCase()}]...`);
+  };
+
+  // Schema Validation check (EXP-06)
+  const handleCheckSchema = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/samples/${currentSampleId}/validate`);
+      const data = await res.json();
+      setSchemaValidationInfo(data);
+      if (data.valid) {
+        showNotice('success', 'Kiểm tra JSON Schema: Hợp lệ 100%!');
+      } else {
+        showNotice('error', `Cảnh báo Schema: ${data.message}`);
+      }
+    } catch (e: any) {
+      showNotice('error', e.message || 'Lỗi kiểm tra schema');
+    }
+  };
+
+  // Import JSON round-trip handler (T-132, EXP-07, DoD 12)
+  const handleExecuteImport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!importFile || !currentSampleId) {
+      showNotice('error', 'Vui lòng chọn file JSON để import');
+      return;
+    }
+    setIsImporting(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', importFile);
+      const res = await fetch(`${API_BASE}/samples/${currentSampleId}/import/json`, {
+        method: 'POST',
+        body: formData,
+      });
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || 'Lỗi khi import file JSON');
+      }
+      const result = await res.json();
+      showNotice('success', `Import thành công: ${result.total_frames} frames, ${result.total_boxes} boxes! (Round-trip verified)`);
+      setShowImportModal(false);
+      setImportFile(null);
+      loadSampleData(currentSampleId);
+    } catch (err: any) {
+      showNotice('error', err.message || 'Lỗi khi import file');
+    } finally {
+      setIsImporting(false);
+    }
   };
 
   const getClassColor = (className: string) => {
@@ -1018,31 +1220,335 @@ export default function App() {
             {isAutoLabeling ? 'AI Đang chạy...' : 'Auto-label (AI)'}
           </button>
 
-          {/* Save Button */}
+          {/* Save Button with Autosave Status (T-085.3, T-091) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <button
+              onClick={handleSaveToBackend}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#059669',
+                color: '#ffffff', border: 'none', padding: '6px 12px', borderRadius: '6px',
+                cursor: 'pointer', fontWeight: 500, fontSize: '13px'
+              }}
+            >
+              <Save size={14} /> Lưu
+            </button>
+            <div style={{ fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              {saveStatus === 'saved' && (
+                <span style={{ color: '#10b981', display: 'flex', alignItems: 'center', gap: '3px' }} title="Dữ liệu đã tự động lưu qua PATCH API">
+                  <CheckCircle2 size={12} /> Auto-saved
+                </span>
+              )}
+              {saveStatus === 'saving' && (
+                <span style={{ color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                  <RefreshCw size={12} className="animate-spin" /> Đang lưu...
+                </span>
+              )}
+              {saveStatus === 'unsaved' && (
+                <span style={{ color: '#94a3b8' }}>
+                  ● Chưa lưu
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Import Ground Truth Button (T-132, DoD 12) */}
           <button
-            onClick={handleSaveToBackend}
+            onClick={() => setShowImportModal(true)}
+            title="Nhập file JSON Ground Truth (Round-trip Verification)"
             style={{
-              display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#059669',
-              color: '#ffffff', border: 'none', padding: '6px 12px', borderRadius: '6px',
-              cursor: 'pointer', fontWeight: 500, fontSize: '13px'
+              display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#334155',
+              color: '#38bdf8', border: '1px solid #0284c7', padding: '6px 12px', borderRadius: '6px',
+              cursor: 'pointer', fontWeight: 600, fontSize: '13px'
             }}
           >
-            <Save size={14} /> Lưu
+            <FileUp size={14} /> Import Ground Truth
           </button>
 
-          {/* Export JSON Button */}
+          {/* Export Dataset Button (T-133, EP-10) */}
           <button
-            onClick={handleExportJSON}
+            onClick={() => { setShowExportModal(true); setSchemaValidationInfo(null); }}
+            title="Xuất dữ liệu: JSON chuẩn, MOTChallenge TXT, YOLO, COCO (T-130..133)"
             style={{
               display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#2563eb',
               color: '#ffffff', border: 'none', padding: '6px 14px', borderRadius: '6px',
-              cursor: 'pointer', fontWeight: 500, fontSize: '13px'
+              cursor: 'pointer', fontWeight: 600, fontSize: '13px', boxShadow: '0 2px 4px rgba(37,99,235,0.3)'
             }}
           >
-            <Download size={14} /> Export JSON
+            <FileDown size={14} /> Export Dataset
           </button>
         </div>
       </header>
+
+      {/* Export Dataset Modal (T-130, T-131, T-133, EXP-09) */}
+      {showExportModal && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(5px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
+        }}>
+          <div style={{
+            width: '540px', backgroundColor: '#1e293b', borderRadius: '12px',
+            border: '1px solid #475569', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
+            padding: '24px', display: 'flex', flexDirection: 'column', gap: '18px'
+          }}>
+            {/* Modal Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{ backgroundColor: '#2563eb', padding: '6px', borderRadius: '8px', color: '#fff' }}>
+                  <FileDown size={18} />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#f8fafc' }}>
+                    Xuất Dữ Liệu Ground Truth (Export)
+                  </h3>
+                  <div style={{ fontSize: '11px', color: '#94a3b8' }}>Sample: {currentSampleId}</div>
+                </div>
+              </div>
+              <button onClick={() => setShowExportModal(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Quality Warning Banner (EXP-09) */}
+            {reviewStats.total > 0 && (reviewStats.total - reviewStats.verified > 0 || (annotationData?.flags?.length || 0) > 0) && (
+              <div style={{
+                backgroundColor: '#451a03', border: '1px solid #d97706', borderRadius: '8px',
+                padding: '12px', display: 'flex', gap: '10px', alignItems: 'flex-start'
+              }}>
+                <AlertTriangle size={18} color="#f59e0b" style={{ flexShrink: 0, marginTop: '2px' }} />
+                <div style={{ fontSize: '12px', color: '#fef3c7', lineHeight: '1.4' }}>
+                  <strong>Cảnh báo chất lượng dữ liệu (EXP-09):</strong>
+                  <div>
+                    Còn <strong style={{ color: '#fbbf24' }}>{reviewStats.total - reviewStats.verified}</strong> frame chưa duyệt 
+                    ({100 - reviewStats.percent}%) và <strong style={{ color: '#f87171' }}>{annotationData?.flags?.length || 0}</strong> cờ lỗi chưa xử lý.
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#fcd34d', marginTop: '3px' }}>
+                    Bạn có thể tiếp tục xuất toàn bộ hoặc tick chọn chỉ xuất các frame đã duyệt bên dưới.
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Format Selection Grid */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <label style={{ fontSize: '12px', fontWeight: 600, color: '#cbd5e1' }}>Chọn định dạng xuất:</label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                {/* Option 1: Standard JSON */}
+                <div 
+                  onClick={() => setExportFormat('json')}
+                  style={{
+                    border: exportFormat === 'json' ? '2px solid #3b82f6' : '1px solid #334155',
+                    backgroundColor: exportFormat === 'json' ? '#1e3a8a' : '#0f172a',
+                    padding: '12px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.15s'
+                  }}
+                >
+                  <div style={{ fontWeight: 700, fontSize: '13px', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ color: '#38bdf8' }}>●</span> JSON Chuẩn (Đề bài)
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
+                    Frame-based [x,y,w,h] pixel gốc, chuẩn schema BBox 2D Tracking (T-130)
+                  </div>
+                </div>
+
+                {/* Option 2: MOTChallenge */}
+                <div 
+                  onClick={() => setExportFormat('mot')}
+                  style={{
+                    border: exportFormat === 'mot' ? '2px solid #3b82f6' : '1px solid #334155',
+                    backgroundColor: exportFormat === 'mot' ? '#1e3a8a' : '#0f172a',
+                    padding: '12px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.15s'
+                  }}
+                >
+                  <div style={{ fontWeight: 700, fontSize: '13px', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ color: '#10b981' }}>●</span> MOTChallenge (.txt)
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
+                    Format MOT chuẩn cho TrackEval benchmark, frame 1-based (T-131)
+                  </div>
+                </div>
+
+                {/* Option 3: YOLO */}
+                <div 
+                  onClick={() => setExportFormat('yolo')}
+                  style={{
+                    border: exportFormat === 'yolo' ? '2px solid #3b82f6' : '1px solid #334155',
+                    backgroundColor: exportFormat === 'yolo' ? '#1e3a8a' : '#0f172a',
+                    padding: '12px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.15s'
+                  }}
+                >
+                  <div style={{ fontWeight: 700, fontSize: '13px', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ color: '#f59e0b' }}>●</span> YOLO Format (.zip)
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
+                    Labels frame_*.txt chuẩn normalized bbox xywh + track_id + data.yaml
+                  </div>
+                </div>
+
+                {/* Option 4: COCO */}
+                <div 
+                  onClick={() => setExportFormat('coco')}
+                  style={{
+                    border: exportFormat === 'coco' ? '2px solid #3b82f6' : '1px solid #334155',
+                    backgroundColor: exportFormat === 'coco' ? '#1e3a8a' : '#0f172a',
+                    padding: '12px', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.15s'
+                  }}
+                >
+                  <div style={{ fontWeight: 700, fontSize: '13px', color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ color: '#8b5cf6' }}>●</span> COCO Format (.json)
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
+                    Chuẩn COCO dataset (images, annotations, categories) cho PyTorch/MMDet
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Scope Toggle */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '8px',
+              backgroundColor: '#0f172a', padding: '10px 12px', borderRadius: '8px', border: '1px solid #334155'
+            }}>
+              <input
+                type="checkbox" id="verifiedOnlyCheck"
+                checked={exportVerifiedOnly}
+                onChange={(e) => setExportVerifiedOnly(e.target.checked)}
+                style={{ cursor: 'pointer', accentColor: '#3b82f6', width: '16px', height: '16px' }}
+              />
+              <label htmlFor="verifiedOnlyCheck" style={{ fontSize: '12px', color: '#f8fafc', cursor: 'pointer', fontWeight: 500 }}>
+                Chỉ xuất các frame đã duyệt (Verified frames only) — Bỏ qua các frame chưa kiểm tra
+              </label>
+            </div>
+
+            {/* Schema Validation Check Status */}
+            {schemaValidationInfo && (
+              <div style={{
+                fontSize: '12px', padding: '8px 12px', borderRadius: '6px',
+                backgroundColor: schemaValidationInfo.valid ? '#064e3b' : '#7f1d1d',
+                color: schemaValidationInfo.valid ? '#a7f3d0' : '#fecaca',
+                border: schemaValidationInfo.valid ? '1px solid #059669' : '1px solid #dc2626'
+              }}>
+                {schemaValidationInfo.valid ? '✓ JSON Schema: Hợp lệ 100%' : `✗ Lỗi Schema: ${schemaValidationInfo.message}`}
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+              <button
+                type="button" onClick={handleCheckSchema}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#334155',
+                  border: '1px solid #475569', color: '#cbd5e1', padding: '8px 12px', borderRadius: '6px',
+                  cursor: 'pointer', fontSize: '12px', fontWeight: 500
+                }}
+              >
+                <FileCheck size={14} color="#38bdf8" /> Kiểm tra Schema (EXP-06)
+              </button>
+
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button
+                  type="button" onClick={() => setShowExportModal(false)}
+                  style={{ backgroundColor: '#334155', border: 'none', color: '#fff', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}
+                >
+                  Hủy
+                </button>
+                <button
+                  type="button" onClick={handleExecuteExport}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#2563eb',
+                    border: 'none', color: '#fff', padding: '8px 18px', borderRadius: '6px',
+                    cursor: 'pointer', fontWeight: 600, fontSize: '13px'
+                  }}
+                >
+                  <Download size={14} /> Tải Xuống File
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Import Ground Truth Modal (T-132, EXP-07, DoD 12) */}
+      {showImportModal && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(5px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
+        }}>
+          <div style={{
+            width: '480px', backgroundColor: '#1e293b', borderRadius: '12px',
+            border: '1px solid #475569', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
+            padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px'
+          }}>
+            {/* Modal Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{ backgroundColor: '#0284c7', padding: '6px', borderRadius: '8px', color: '#fff' }}>
+                  <FileUp size={18} />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#f8fafc' }}>
+                    Nhập Ground Truth (Round-Trip Test)
+                  </h3>
+                  <div style={{ fontSize: '11px', color: '#94a3b8' }}>Khôi phục và kiểm chứng tính toàn vẹn (DoD 12)</div>
+                </div>
+              </div>
+              <button onClick={() => setShowImportModal(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleExecuteImport} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div style={{ fontSize: '12px', color: '#cbd5e1', lineHeight: '1.4' }}>
+                Chọn file JSON ground truth (được xuất từ công cụ này hoặc có cấu trúc tương thích) để nạp vào sample <strong>{currentSampleId}</strong>.
+              </div>
+
+              {/* File selector dropzone */}
+              <div
+                onClick={() => importFileInputRef.current?.click()}
+                style={{
+                  border: '2px dashed #0284c7', borderRadius: '8px', padding: '24px 16px',
+                  textAlign: 'center', cursor: 'pointer', backgroundColor: '#0f172a'
+                }}
+              >
+                <FileUp size={28} color="#38bdf8" style={{ margin: '0 auto 8px' }} />
+                <div style={{ fontSize: '13px', color: '#f8fafc', fontWeight: 500 }}>
+                  {importFile ? importFile.name : 'Bấm để chọn file Ground Truth JSON (.json)'}
+                </div>
+                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
+                  Hỗ trợ JSON format chuẩn (BBox2DTracking schema)
+                </div>
+                <input
+                  type="file" ref={importFileInputRef}
+                  onChange={(e) => { if (e.target.files?.[0]) setImportFile(e.target.files[0]); }}
+                  accept=".json,application/json"
+                  style={{ display: 'none' }}
+                />
+              </div>
+
+              {/* Action buttons */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '6px' }}>
+                <button
+                  type="button" onClick={() => setShowImportModal(false)}
+                  style={{ backgroundColor: '#334155', border: 'none', color: '#fff', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit" disabled={isImporting || !importFile}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#0284c7',
+                    border: 'none', color: '#fff', padding: '8px 18px', borderRadius: '6px',
+                    cursor: (isImporting || !importFile) ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '13px'
+                  }}
+                >
+                  {isImporting && <RefreshCw size={14} className="animate-spin" />}
+                  {isImporting ? 'Đang nạp...' : 'Xác nhận Import'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Manual Flag Note Modal (T-120) */}
       {showFlagModal && (
@@ -1577,6 +2083,7 @@ export default function App() {
                         strokeWidth={isSelected ? 3 : 2}
                         fill={isSelected ? `${color}40` : `${color}15`}
                         cornerRadius={2}
+                        perfectDrawEnabled={false}
                       />
 
                       <Rect
@@ -1586,14 +2093,18 @@ export default function App() {
                         height={20}
                         fill={color}
                         cornerRadius={2}
+                        perfectDrawEnabled={false}
+                        listening={false}
                       />
                       <KonvaText
                         x={x * scale + 6}
                         y={Math.max(2, y * scale - 18)}
-                        text={annotationMode === 'track' ? `#${obj.track_id} ${obj.class}` : obj.class}
+                        text={annotationMode === 'track' ? `#${obj.track_id} ${obj.class}${obj.source === 'interpolated' ? ' ~' : ''}` : obj.class}
                         fontSize={11}
-                        fill="#ffffff"
                         fontStyle="bold"
+                        fill="#ffffff"
+                        perfectDrawEnabled={false}
+                        listening={false}
                       />
                     </Group>
                   );
@@ -1772,6 +2283,65 @@ export default function App() {
                   >
                     Xóa toàn bộ Track #{selectedObject.track_id} khỏi video
                   </button>
+
+                  {/* Keyframe & Interpolation Tools (EP-07, T-066, T-164) */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', borderTop: '1px solid #334155', paddingTop: '8px' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 700, color: '#38bdf8', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <Zap size={12} /> Keyframe & Nội suy (T-066)
+                    </div>
+                    
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button
+                        onClick={handleSetStartKeyframe}
+                        title="Đặt BBox tại frame này làm mốc bắt đầu"
+                        style={{
+                          flex: 1, padding: '5px', borderRadius: '4px', border: '1px solid #0284c7',
+                          backgroundColor: keyframeStart?.track_id === selectedObject.track_id && keyframeStart?.frame === currentFrame ? '#0369a1' : '#0f172a',
+                          color: '#38bdf8', cursor: 'pointer', fontSize: '11px', fontWeight: 600
+                        }}
+                      >
+                        {keyframeStart && keyframeStart.track_id === selectedObject.track_id 
+                          ? `Mốc A: #${keyframeStart.frame}` 
+                          : 'Đặt Mốc A'}
+                      </button>
+
+                      <button
+                        onClick={handleSetEndKeyframe}
+                        title="Đặt BBox tại frame này làm mốc kết thúc"
+                        style={{
+                          flex: 1, padding: '5px', borderRadius: '4px', border: '1px solid #10b981',
+                          backgroundColor: keyframeEnd?.track_id === selectedObject.track_id && keyframeEnd?.frame === currentFrame ? '#047857' : '#0f172a',
+                          color: '#34d399', cursor: 'pointer', fontSize: '11px', fontWeight: 600
+                        }}
+                      >
+                        {keyframeEnd && keyframeEnd.track_id === selectedObject.track_id 
+                          ? `Mốc B: #${keyframeEnd.frame}` 
+                          : 'Đặt Mốc B'}
+                      </button>
+                    </div>
+
+                    {/* Execute Interpolate Button */}
+                    {keyframeStart && keyframeEnd && keyframeStart.track_id === selectedObject.track_id && keyframeEnd.track_id === selectedObject.track_id && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <button
+                          onClick={handleExecuteInterpolate}
+                          style={{
+                            backgroundColor: '#0284c7', border: 'none', color: '#fff',
+                            padding: '6px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 700,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
+                          }}
+                        >
+                          <Sparkles size={13} /> Nội suy từ #{Math.min(keyframeStart.frame, keyframeEnd.frame)} → #{Math.max(keyframeStart.frame, keyframeEnd.frame)}
+                        </button>
+                        <button
+                          onClick={handleResetKeyframes}
+                          style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '10px', cursor: 'pointer', textAlign: 'center' }}
+                        >
+                          Hủy đánh dấu Keyframe
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

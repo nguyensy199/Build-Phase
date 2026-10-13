@@ -322,6 +322,34 @@ def save_annotations(sample_id: str, data: dict = ...):
         json.dump(data, f, indent=2)
     return {"status": "saved", "sample_id": sample_id}
 
+@app.patch(f"{settings.API_V1_STR}/samples/{{sample_id}}/annotations", tags=["Annotations"])
+def patch_annotations(sample_id: str, data: dict = ...):
+    """
+    T-082, T-085.3: Batch patch / Autosave annotations.
+    """
+    det_file = settings.DETECTIONS_PATH / f"{sample_id}.json"
+    settings.DETECTIONS_PATH.mkdir(parents=True, exist_ok=True)
+    current_data = {}
+    if det_file.exists():
+        try:
+            with open(det_file, "r", encoding="utf-8") as f:
+                current_data = json.load(f)
+        except Exception:
+            current_data = {}
+
+    if "frames" in data:
+        current_data["frames"] = data["frames"]
+    if "flags" in data:
+        current_data["flags"] = data["flags"]
+    if "info" in data:
+        current_data.setdefault("info", {}).update(data["info"])
+    if "classes" in data:
+        current_data["classes"] = data["classes"]
+
+    with open(det_file, "w", encoding="utf-8") as f:
+        json.dump(current_data, f, indent=2)
+    return {"status": "patched", "sample_id": sample_id}
+
 @app.post(f"{settings.API_V1_STR}/samples/{{sample_id}}/auto-label", tags=["AI"])
 def run_auto_label(sample_id: str, tracker_type: str = "botsort", conf: float = 0.25):
     """
